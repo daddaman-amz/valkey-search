@@ -247,6 +247,10 @@ EvaluationResult TermPredicate::Evaluate(const valkey_search::indexes::text::Tex
 
   VMSDK_LOG(WARNING, nullptr) << "Word '" << term_ << "' found " << ranges.size() 
                             << " positions: " << FormatPositionRanges(ranges);
+  if (ranges.empty()) {
+    VMSDK_LOG(WARNING, nullptr) << "Word '" << term_ << "' found but no positions in requested field";
+    return EvaluationResult(false);
+  }
   return EvaluationResult(true, std::move(ranges));
 }
 
@@ -290,8 +294,8 @@ EvaluationResult PrefixPredicate::Evaluate(const valkey_search::indexes::text::T
           if ((pos_iter.GetFieldMask() & field_mask) != 0) {
               auto pos = pos_iter.GetPosition();
               all_ranges.emplace_back(pos, pos);
-              pos_iter.NextPosition();
           }
+          pos_iter.NextPosition();
         }
         matches_found++;
         VMSDK_LOG(WARNING, nullptr) << "Prefix match: word '" << word << "' matches prefix '" << term_ << "'";
