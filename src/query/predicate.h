@@ -18,6 +18,8 @@
 #include "vmsdk/src/managed_pointers.h"
 #include "vmsdk/src/type_conversions.h"
 
+#include "src/indexes/text/text_iterator.h"
+
 namespace valkey_search::indexes {
 class Text;
 class Numeric;
@@ -26,6 +28,7 @@ class Tag;
 
 namespace valkey_search::indexes::text {
 class TextIterator;
+class TextIndex;
 }
 
 namespace valkey_search::query {
@@ -43,12 +46,26 @@ enum class PredicateType {
 class TextPredicate;
 class TagPredicate;
 class NumericPredicate;
+
+struct EvaluationResult {
+  bool matches;  //  Boolean result
+  std::vector<valkey_search::indexes::text::PositionRange> position_ranges;  // Only meaningful for text predicates
+  
+  // Constructor for non-text predicates (numeric/tag) - boolean + empty list
+  explicit EvaluationResult(bool result) 
+    : matches(result), position_ranges() {}
+  
+  // Constructor for text predicates - boolean + position ranges
+  EvaluationResult(bool result, std::vector<valkey_search::indexes::text::PositionRange> ranges) 
+    : matches(result), position_ranges(std::move(ranges)) {}
+};
+
 class Evaluator {
  public:
   virtual ~Evaluator() = default;
-  virtual bool EvaluateText(const TextPredicate& predicate) = 0;
-  virtual bool EvaluateTags(const TagPredicate& predicate) = 0;
-  virtual bool EvaluateNumeric(const NumericPredicate& predicate) = 0;
+  virtual EvaluationResult EvaluateText(const TextPredicate& predicate) = 0;
+  virtual EvaluationResult EvaluateTags(const TagPredicate& predicate) = 0;
+  virtual EvaluationResult EvaluateNumeric(const NumericPredicate& predicate) = 0;
 };
 
 class Predicate;
@@ -60,7 +77,7 @@ struct EstimatedQualifiedEntries {
 class Predicate {
  public:
   explicit Predicate(PredicateType type) : type_(type) {}
-  virtual bool Evaluate(Evaluator& evaluator) const = 0;
+  virtual EvaluationResult Evaluate(Evaluator& evaluator) const = 0;
   virtual ~Predicate() = default;
   PredicateType GetType() const { return type_; }
 
@@ -72,7 +89,7 @@ class NegatePredicate : public Predicate {
  public:
   explicit NegatePredicate(std::unique_ptr<Predicate> predicate)
       : Predicate(PredicateType::kNegate), predicate_(std::move(predicate)) {}
-  bool Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
   const Predicate* GetPredicate() const { return predicate_.get(); }
 
  private:
@@ -96,8 +113,8 @@ class NumericPredicate : public Predicate {
   bool IsStartInclusive() const { return is_inclusive_start_; }
   double GetEnd() const { return end_; }
   bool IsEndInclusive() const { return is_inclusive_end_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const double* value) const;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const double* value) const;
 
  private:
   const indexes::Numeric* index_;
@@ -114,9 +131,9 @@ class TagPredicate : public Predicate {
   TagPredicate(const indexes::Tag* index, absl::string_view alias,
                absl::string_view identifier, absl::string_view raw_tag_string,
                const absl::flat_hash_set<absl::string_view>& tags);
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const absl::flat_hash_set<absl::string_view>* tags,
-                bool case_sensitive) const;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const absl::flat_hash_set<absl::string_view>* tags,
+                          bool case_sensitive) const;
   const indexes::Tag* GetIndex() const { return index_; }
   absl::string_view GetAlias() const { return alias_; }
   absl::string_view GetIdentifier() const {
@@ -140,8 +157,9 @@ class TextPredicate : public Predicate {
  public:
   TextPredicate() : Predicate(PredicateType::kText) {}
   virtual ~TextPredicate() = default;
-  virtual bool Evaluate(Evaluator& evaluator) const = 0;
-  virtual bool Evaluate(const std::string_view& text) const = 0;
+  virtual EvaluationResult Evaluate(Evaluator& evaluator) const = 0;
+  // virtual bool Evaluate(const std::string_view& text) const = 0; // can remove
+  virtual EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const = 0;
   virtual const indexes::Text* GetIndex() const = 0;
   virtual std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const = 0;
@@ -160,8 +178,9 @@ class TermPredicate : public TextPredicate {
     return vmsdk::RetainUniqueValkeyString(identifier_.get());
   }
   absl::string_view GetTextString() const { return term_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const std::string_view& text) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const override; //new
+  // bool Evaluate(const std::string_view& text) const override;
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const override;
 
@@ -185,8 +204,9 @@ class PrefixPredicate : public TextPredicate {
     return vmsdk::RetainUniqueValkeyString(identifier_.get());
   }
   absl::string_view GetTextString() const { return term_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const std::string_view& text) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const override; //new
+  // bool Evaluate(const std::string_view& text) const override;
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const override;
 
@@ -210,8 +230,9 @@ class SuffixPredicate : public TextPredicate {
     return vmsdk::RetainUniqueValkeyString(identifier_.get());
   }
   absl::string_view GetTextString() const { return term_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const std::string_view& text) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const override; //new
+  // bool Evaluate(const std::string_view& text) const override;
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const override;
 
@@ -235,8 +256,9 @@ class InfixPredicate : public TextPredicate {
     return vmsdk::RetainUniqueValkeyString(identifier_.get());
   }
   absl::string_view GetTextString() const { return term_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const std::string_view& text) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const override;
+  // bool Evaluate(const std::string_view& text) const override;
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const override;
 
@@ -261,8 +283,9 @@ class FuzzyPredicate : public TextPredicate {
   }
   absl::string_view GetTextString() const { return term_; }
   uint32_t GetDistance() const { return distance_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const std::string_view& text) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const override;
+  // bool Evaluate(const std::string_view& text) const override;
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const override;
 
@@ -280,8 +303,9 @@ class ProximityPredicate : public TextPredicate {
                      uint32_t slop = 0, bool inorder = true);
   uint32_t Slop() const { return slop_; }
   bool InOrder() const { return inorder_; }
-  bool Evaluate(Evaluator& evaluator) const override;
-  bool Evaluate(const std::string_view& text) const override { return false; }
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(const valkey_search::indexes::text::TextIndex& text_index) const override;
+  // bool Evaluate(const std::string_view& text) const override { return false; }
   std::unique_ptr<indexes::text::TextIterator> BuildTextIterator(
       const void* fetcher) const override;
   const indexes::Text* GetIndex() const override {
@@ -305,7 +329,7 @@ class ComposedPredicate : public Predicate {
                     std::unique_ptr<Predicate> rhs_predicate,
                     LogicalOperator logical_op);
 
-  bool Evaluate(Evaluator& evaluator) const override;
+  EvaluationResult Evaluate(Evaluator& evaluator) const override;
   const Predicate* GetLhsPredicate() const { return lhs_predicate_.get(); }
   const Predicate* GetRhsPredicate() const { return rhs_predicate_.get(); }
 

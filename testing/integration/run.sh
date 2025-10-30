@@ -6,7 +6,7 @@ WORKSPACE_HOME=$(readlink -f ${ROOT_DIR}/../..)
 BUILD_CONFIG=release
 TEST=all
 CLEAN="no"
-VALKEY_VERSION="8.1.1"
+VALKEY_VERSION="unstable"
 VALKEY_JSON_VERSION="unstable"
 DUMP_TEST_ERRORS_STDOUT="no"
 

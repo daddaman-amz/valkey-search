@@ -30,6 +30,10 @@
 #include "vmsdk/src/type_conversions.h"
 #include "vmsdk/src/valkey_module_api/valkey_module.h"
 
+// #include "src/query/predicate.h"
+// #include "src/indexes/text/text_index.h"
+#include "src/indexes/text.h"
+
 namespace valkey_search::options {
 
 constexpr absl::string_view kMaxSearchResultRecordSizeConfig{
@@ -78,57 +82,98 @@ namespace valkey_search::query {
 
 class PredicateEvaluator : public query::Evaluator {
  public:
-  explicit PredicateEvaluator(const RecordsMap &records) : records_(records) {}
-  bool EvaluateTags(const query::TagPredicate &predicate) override {
+  explicit PredicateEvaluator(const RecordsMap &records) 
+    : records_(records), per_key_indexes_(nullptr), target_key_(nullptr) {}
+
+  PredicateEvaluator(const RecordsMap &records,
+                    const absl::node_hash_map<valkey_search::indexes::text::Key, valkey_search::indexes::text::TextIndex>* per_key_indexes,
+                    InternedStringPtr target_key)
+    : records_(records), per_key_indexes_(per_key_indexes), target_key_(target_key) {}  
+
+  EvaluationResult EvaluateTags(const query::TagPredicate &predicate) override {
     auto identifier = predicate.GetRetainedIdentifier();
     auto it = records_.find(vmsdk::ToStringView(identifier.get()));
     if (it == records_.end()) {
-      return false;
+      return EvaluationResult(false);;
     }
     auto index = predicate.GetIndex();
     auto tags = indexes::Tag::ParseSearchTags(
         vmsdk::ToStringView(it->second.value.get()), index->GetSeparator());
     if (!tags.ok()) {
-      return false;
+      return EvaluationResult(false);;
     }
     return predicate.Evaluate(&tags.value(), index->IsCaseSensitive());
   }
 
-  bool EvaluateNumeric(const query::NumericPredicate &predicate) override {
+  EvaluationResult EvaluateNumeric(const query::NumericPredicate &predicate) override {
     auto identifier = predicate.GetRetainedIdentifier();
     auto it = records_.find(vmsdk::ToStringView(identifier.get()));
     if (it == records_.end()) {
-      return false;
+      return EvaluationResult(false);
     }
     auto out_numeric =
         vmsdk::To<double>(vmsdk::ToStringView(it->second.value.get()));
     if (!out_numeric.ok()) {
-      return false;
+      return EvaluationResult(false);
     }
     return predicate.Evaluate(&out_numeric.value());
   }
 
-  bool EvaluateText(const query::TextPredicate &predicate) override {
-    // TODO: Implement TextPredicate evaluation.
-    return true;
+  EvaluationResult EvaluateText(const query::TextPredicate &predicate) override {
+    // If we have per-key indexes, use them for text evaluation
+    if (per_key_indexes_ && target_key_) {
+      return EvaluateTextUsingIndex(predicate);
+    }
+    
+    // Fallback to existing placeholder
+    VMSDK_LOG(WARNING, nullptr) << "PredicateEvaluator::EvaluateText >> Using fallback to false";
+    return EvaluationResult(false);
   }
 
  private:
   const RecordsMap &records_;
+  const absl::node_hash_map<valkey_search::indexes::text::Key, valkey_search::indexes::text::TextIndex>* per_key_indexes_;
+  InternedStringPtr target_key_;
+
+  EvaluationResult EvaluateTextUsingIndex(const query::TextPredicate &predicate) {
+    VMSDK_LOG(WARNING, nullptr) << "EvaluateTextUsingIndex called - delegating to predicate";
+    
+    auto it = per_key_indexes_->find(target_key_);
+    if (it == per_key_indexes_->end()) {
+      VMSDK_LOG(WARNING, nullptr) << "Target key not found in per_key_indexes";
+      return EvaluationResult(false);
+    }
+
+    VMSDK_LOG(WARNING, nullptr) << "EvaluateTextUsingIndex >> Target key: " << target_key_->Str();
+
+    // Just pass the text_index, predicate computes its own field_mask
+    return predicate.Evaluate(it->second);
+  }
 };
 
 bool VerifyFilter(const query::Predicate *predicate,
-                  const RecordsMap &records) {
+                  const RecordsMap &records,
+                  const query::SearchParameters &parameters,
+                  InternedStringPtr target_key) {
   if (predicate == nullptr) {
     return true;
   }
+  if (parameters.index_schema && parameters.index_schema->GetTextIndexSchema()) {
+    return parameters.index_schema->GetTextIndexSchema()->WithPerKeyTextIndexes(
+      [&](auto& per_key_indexes) {
+        PredicateEvaluator evaluator(records, &per_key_indexes, target_key);
+        EvaluationResult result = predicate->Evaluate(evaluator);
+        return result.matches;  // Extract bool at top level
+      });
+  }
   PredicateEvaluator evaluator(records);
-  return predicate->Evaluate(evaluator);
+  EvaluationResult result = predicate->Evaluate(evaluator);
+  return result.matches;  // Extract bool at top level
 }
 
 absl::StatusOr<RecordsMap> GetContentNoReturnJson(
     ValkeyModuleCtx *ctx, const AttributeDataType &attribute_data_type,
-    const query::SearchParameters &parameters, absl::string_view key,
+    const query::SearchParameters &parameters, InternedStringPtr key_ptr,
     const std::string &vector_identifier) {
   absl::flat_hash_set<absl::string_view> identifiers;
   identifiers.insert(kJsonRootElementQuery);
@@ -136,6 +181,7 @@ absl::StatusOr<RecordsMap> GetContentNoReturnJson(
        parameters.filter_parse_results.filter_identifiers) {
     identifiers.insert(filter_identifier);
   }
+  auto key = key_ptr->Str(); 
   auto key_str = vmsdk::MakeUniqueValkeyString(key);
   auto key_obj = vmsdk::MakeUniqueValkeyOpenKey(
       ctx, key_str.get(), VALKEYMODULE_OPEN_KEY_NOEFFECTS | VALKEYMODULE_READ);
@@ -146,7 +192,7 @@ absl::StatusOr<RecordsMap> GetContentNoReturnJson(
     return content;
   }
   if (!VerifyFilter(parameters.filter_parse_results.root_predicate.get(),
-                    content)) {
+                    content, parameters, key_ptr)) {
     return absl::NotFoundError("Verify filter failed");
   }
   RecordsMap return_content;
@@ -162,12 +208,12 @@ absl::StatusOr<RecordsMap> GetContentNoReturnJson(
 
 absl::StatusOr<RecordsMap> GetContent(
     ValkeyModuleCtx *ctx, const AttributeDataType &attribute_data_type,
-    const query::SearchParameters &parameters, absl::string_view key,
+    const query::SearchParameters &parameters, InternedStringPtr key_ptr,
     const std::string &vector_identifier) {
   if (attribute_data_type.ToProto() ==
           data_model::AttributeDataType::ATTRIBUTE_DATA_TYPE_JSON &&
       parameters.return_attributes.empty()) {
-    return GetContentNoReturnJson(ctx, attribute_data_type, parameters, key,
+    return GetContentNoReturnJson(ctx, attribute_data_type, parameters, key_ptr,
                                   vector_identifier);
   }
   absl::flat_hash_set<absl::string_view> identifiers;
@@ -180,6 +226,7 @@ absl::StatusOr<RecordsMap> GetContent(
       identifiers.insert(filter_identifier);
     }
   }
+  auto key = key_ptr->Str(); 
   auto key_str = vmsdk::MakeUniqueValkeyString(key);
   auto key_obj = vmsdk::MakeUniqueValkeyOpenKey(
       ctx, key_str.get(), VALKEYMODULE_OPEN_KEY_NOEFFECTS | VALKEYMODULE_READ);
@@ -190,7 +237,7 @@ absl::StatusOr<RecordsMap> GetContent(
     return content;
   }
   if (!VerifyFilter(parameters.filter_parse_results.root_predicate.get(),
-                    content)) {
+                    content, parameters, key_ptr)) {
     return absl::NotFoundError("Verify filter failed");
   }
   if (parameters.return_attributes.empty()) {
@@ -241,7 +288,7 @@ void ProcessNeighborsForReply(ValkeyModuleCtx *ctx,
       continue;
     }
     auto content = GetContent(ctx, attribute_data_type, parameters,
-                              *neighbor.external_id, identifier);
+                              neighbor.external_id, identifier);
     if (!content.ok()) {
       continue;
     }

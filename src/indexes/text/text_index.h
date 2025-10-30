@@ -89,6 +89,13 @@ class TextIndexSchema {
 
   // Whether to store position offsets for phrase queries
   bool with_offsets_ = false;
+
+  public: 
+    template<typename Func>
+  auto WithPerKeyTextIndexes(Func&& func) -> decltype(func(per_key_text_indexes_)) {
+    std::lock_guard<std::mutex> guard(per_key_text_indexes_mutex_);
+    return func(per_key_text_indexes_);
+  }
 };
 
 }  // namespace valkey_search::indexes::text

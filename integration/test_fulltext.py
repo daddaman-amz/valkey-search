@@ -639,3 +639,145 @@ class TestFullText(ValkeySearchTestCaseBase):
     def test_suffix_search(self):
         # TODO
         pass
+
+    def test_mixed_predicate_evaluator(self):
+        """
+        Test PredicateEvaluator with mixed text, numeric, and tag predicates.
+        Tests that the unified evaluator correctly routes each predicate type.
+        """
+        client: Valkey = self.server.get_new_client()
+        
+        # Index with text, numeric, and tag fields
+        client.execute_command("FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "content", "TEXT", "NOSTEM","title", "TEXT", "NOSTEM", "Addr", "TEXT", "NOSTEM",
+                            "salary", "NUMERIC", 
+                            "skills", "TAG", "SEPARATOR", "|")
+        
+        # Test documents
+        client.execute_command("HSET", "doc:1", "content", "software engineer", "title", "Title:1", "Addr", "12 Apt ABC", "salary", "100000", "skills", "python|java")
+        client.execute_command("HSET", "doc:2", "content", "software manager", "title", "Title:2", "Addr", "12 Apt EFG", "salary", "120000", "skills", "python|ml|leadership")
+        client.execute_command("HSET", "doc:3", "content", "product manager", "title", "Title:2", "Addr", "12 Apt EFG", "salary", "90000", "skills", "strategy|leadership")
+        
+        # Test 1: Text + Numeric (AND)
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"manager" @salary:[90000 110000]')
+        assert result[0] == 1  # Should find doc:1
+
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"manager" @salary:[90000 130000]')
+        assert result[0] == 2  # Should find doc:1, doc:2
+        
+        # Test 1.1: Text prefix + Numeric (AND)
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"eng*" @salary:[90000 110000]')
+        assert result[0] == 1  # Should find doc:1
+
+        # Test 2: Text + Tag (OR) 
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"product" | @skills:{java}')
+        assert result[0] == 2  # Should find doc:1 (java) and doc:2 (scientist)
+        
+        # Test 3: All three types (complex OR)
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"manager" | @salary:[115000 125000] | @skills:{python}')
+        assert result[0] == 3  # Should find all docs
+        
+        # Test 4: All three types (complex AND) 
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"engineer" @salary:[90000 110000] @skills:{python}')
+        assert result[0] == 1  # Should find doc:1 only
+        
+        # Test 5: Negation with mixed types
+        result = client.execute_command("FT.SEARCH", "idx", '-@content:"manager" @skills:{python}')
+        assert result[0] == 1  # Should find doc:1 only
+
+
+    def test_proximity_predicate_evaluator(self):
+        """
+        Test PredicateEvaluator with proximity predicates (phrase searches).
+        Tests that proximity predicates are handled correctly by the evaluator.
+        """
+        client: Valkey = self.server.get_new_client()
+        
+        # Create index with text fields
+        client.execute_command("FT.CREATE", "idx", "ON", "HASH", "SCHEMA", 
+                            "content", "TEXT", "NOSTEM", 
+                            "title", "TEXT", "NOSTEM")
+        
+        # Test documents with proximity-testable content
+        client.execute_command("HSET", "doc:1", "content", "software engineer developer is available. If not escalate to manager", "title", "Job Title")
+        client.execute_command("HSET", "doc:2", "content", "Availability of software engineering manager depends on calendar", "title", "Career Path") 
+        client.execute_command("HSET", "doc:3", "content", "Every software developer is engineer but every engineer is not a software developer engineer", "title", "Management Job")
+        
+        # Test 1: Exact phrase (proximity with slop=0, inorder=true)
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"software engineer developer"')
+        assert result[0] == 1  # Should find doc:1 only (exact phrase)
+        
+        # Test 2: Reverse order phrase (should not match with inorder=true)
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"software developer engineer"') 
+        assert result[0] == 1  # Should find doc:2 only
+        
+        # # Test 3: Mixed proximity + other predicates (AND)
+        # result = client.execute_command("FT.SEARCH", "idx", '@content:"software (engine*) (developer|manager)" @title:"Job*"')
+        # assert result[0] == 1  # Should find doc:1 (phrase + prefix match)
+        
+        # # Test 4: Mixed proximity + other predicates (OR)
+        # result = client.execute_command("FT.SEARCH", "idx", '@content:"software engineer" | @title:"Management*"')
+        # assert result[0] == 2  # Should find doc:1 (phrase) and doc:3 (title prefix)
+        
+        # # Test 5: Proximity in different fields
+        # result = client.execute_command("FT.SEARCH", "idx", '@content:"product manager" | @title:"Job Title"')
+        # assert result[0] == 2  # Should find doc:3 (content phrase) and doc:1 (title phrase)
+
+
+
+    def test_proximity_predicate_evaluator_optimized(self):
+        """
+        Test PredicateEvaluator with proximity predicates on longer documents.
+        This test highlights the optimization for ordered proximity queries where
+        terms appear multiple times. The old exhaustive algorithm would test all
+        combinations, but the optimized version advances only violating terms.
+        """
+        client: Valkey = self.server.get_new_client()
+        
+        # Create index with text fields
+        client.execute_command("FT.CREATE", "idx", "ON", "HASH", "SCHEMA", 
+                            "content", "TEXT", "NOSTEM")
+        
+        # Document with many occurrences of each term (worst case for exhaustive search)
+        # "software" appears ~20 times, "engineer" appears ~20 times
+        # Old algorithm: 20 * 20 = 400 combinations to test
+        # Optimized: advances only violating term, much faster
+        long_content = (
+            "The software industry needs software engineers. "
+            "Software development requires software skills. "
+            "Many software companies hire software professionals. "
+            "Software engineering is about software quality. "
+            "Good software comes from good software practices. "
+            "Software architect designs software systems. "
+            "Software testing ensures software reliability. "
+            "Software maintenance keeps software running. "
+            "Software documentation helps software users. "
+            "Software innovation drives software progress. "
+            "A software engineer builds software solutions. "
+            "Senior software engineer leads software teams. "
+            "Junior software engineer learns software craft. "
+            "The software engineer role involves software design. "
+            "Every software engineer writes software code. "
+            "Software engineer position requires software expertise. "
+            "Software engineer career offers software opportunities. "
+            "Software engineer salary reflects software value. "
+            "Software engineer training improves software skills. "
+            "Software engineer certification validates software knowledge."
+        )
+        
+        client.execute_command("HSET", "doc:1", "content", long_content)
+        client.execute_command("HSET", "doc:2", "content", 
+            "The engineer works on hardware. Software is mentioned later.")
+        client.execute_command("HSET", "doc:3", "content", 
+            "Many topics discussed here. Finally, a software engineer appears.")
+        
+        # Test 1: Ordered phrase "software engineer" - should find doc:1 and doc:3
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"software engineer"')
+        assert result[0] == 2  # Should find doc:1 and doc:3
+        
+        # Test 2: Reverse order "engineer software" - should not match (ordered)
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"engineer software"')
+        assert result[0] == 0  # Should find no matches (wrong order)
+        
+        # Test 3: Three-term phrase with many occurrences
+        result = client.execute_command("FT.SEARCH", "idx", '@content:"software engineer builds"')
+        assert result[0] == 1  # Should find doc:1 only
