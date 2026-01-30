@@ -16,6 +16,9 @@
 #include "src/indexes/text/fuzzy.h"
 #include "src/indexes/text/lexer.h"
 #include "src/valkey_search_options.h"
+#include "src/indexes/text/negation_iterator.h"
+#include "src/indexes/text/negation_fetcher.h"
+#include "vmsdk/src/log.h"
 
 namespace valkey_search::indexes {
 
@@ -135,6 +138,7 @@ class ProximityFetcher : public indexes::EntriesFetcherBase {
   size_t size_;
 };
 
+
 std::unique_ptr<indexes::EntriesFetcherBase> BuildExactPhraseFetcher(
     const ComposedPredicate* composed_predicate) {
   absl::InlinedVector<std::unique_ptr<indexes::text::TextIterator>,
@@ -161,6 +165,40 @@ std::unique_ptr<indexes::EntriesFetcherBase> BuildExactPhraseFetcher(
 }
 
 void* TextPredicate::Search(bool negate) const {
+   if (negate) {
+VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  negate is " << negate;
+
+    // Build positive iterator to collect matched keys
+    size_t estimated_size = EstimateSize();
+VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  estimated_size is " << estimated_size;
+    auto fetcher = std::make_unique<indexes::Text::EntriesFetcher>(
+        estimated_size, GetTextIndexSchema()->GetTextIndex(), nullptr,
+        GetFieldMask(), false);
+    fetcher->predicate_ = this;
+    auto positive_iter = BuildTextIterator(fetcher.get());
+    // Collect matched keys
+    InternedStringSet matched_keys;
+    while (!positive_iter->DoneKeys()) {
+      matched_keys.insert(positive_iter->CurrentKey());
+      positive_iter->NextKey();
+    }
+VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  matched_keys count is " << matched_keys.size();
+    // Get tracked and untracked keys from schema (copies, not references)
+    InternedStringSet tracked_keys = GetTextIndexSchema()->GetSchemaTrackedKeys();
+    InternedStringSet untracked_keys = GetTextIndexSchema()->GetSchemaUntrackedKeys();
+
+    // Calculate negation size: (tracked - matched) + untracked
+    size_t negation_size = (tracked_keys.size() > matched_keys.size() 
+                            ? tracked_keys.size() - matched_keys.size() 
+                            : 0) + untracked_keys.size();
+VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  negation_size is " << negation_size;
+    // Create negation iterator - iterator now owns the sets
+    auto neg_iter = std::make_unique<indexes::text::NegationTextIterator>(
+        std::move(tracked_keys), std::move(matched_keys), std::move(untracked_keys), GetFieldMask());
+    
+    return new NegationFetcher(std::move(neg_iter), negation_size);
+  }
+  
   size_t estimated_size = EstimateSize();
   // We do not perform positional checks on the initial term/prefix/suffix/fuzzy
   // predicate fetchers from the entries fetcher search.

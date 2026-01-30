@@ -1076,6 +1076,42 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         result = client.execute_command("FT.SEARCH", "idx", 'word10 @content:word11 word12', "INORDER")
         assert (result[0], result[1]) == (1, b"doc:7")
 
+        # if not prefilter_eval_enabled:
+        #     return
+
+        # # Exact phrase negation
+        # result = client.execute_command("FT.SEARCH", "idx", '-@content:"alpha beta"', "NOCONTENT")
+        # assert result[0] == 10 and b"doc:1" not in result
+
+        # # Double negation
+        # result = client.execute_command("FT.SEARCH", "idx", '-(-@content:"alpha beta")', "NOCONTENT")
+        # assert result[0] == 1 and b"doc:1" in result
+        import pdb; pdb.set_trace()
+        result = client.execute_command("FT.SEARCH", "idx", '-@content:"alpha beta"')
+        assert result[0] == 10 and b"doc:1" not in result
+
+        # Double negation
+        result = client.execute_command("FT.SEARCH", "idx", '-(-@content:"alpha beta")')
+        assert result[0] == 1 and b"doc:1" in result
+
+        # Phrase negation with INORDER
+        result = client.execute_command("FT.SEARCH", "idx", '-alpha -beta', "INORDER")
+        assert b"doc:1" not in result and b"doc:2" not in result and b"doc:5" not in result
+
+        # Phrase negation without INORDER
+        result = client.execute_command("FT.SEARCH", "idx", '-alpha -beta')
+        expected_excluded = {b"doc:1", b"doc:2", b"doc:3", b"doc:5", b"doc:8"}
+        assert len(expected_excluded & set(result[1::2])) == 0
+
+        # Phrase negation with SLOP
+        result = client.execute_command("FT.SEARCH", "idx", '-alpha -beta', "SLOP", "0")
+        assert b"doc:1" not in result and b"doc:3" not in result  # Adjacent pairs excluded
+
+        result = client.execute_command("FT.SEARCH", "idx", '-alpha -beta', "SLOP", "1")
+        assert b"doc:1" not in result and b"doc:2" not in result and b"doc:3" not in result
+
+
+
     def test_proximity_slop_violation_advancement(self):
         """
             Test that proximity slop violation advancement works as expected.
@@ -1630,6 +1666,75 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         assert result[0] == 0
         result = client.execute_command("FT.SEARCH", "idx", "@color:{green} cat slow @price:[10 30] soft", "DIALECT", "2")
         assert result[0] == 0
+
+    def test_text_negation_basic(self):
+        """Test basic text negation functionality"""
+        client: Valkey = self.server.get_new_client()
+        client.execute_command("FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA",
+                             "title", "TEXT")
+        # Insert test data
+        client.execute_command("HSET", "doc:1", "title", "hello world")
+        client.execute_command("HSET", "doc:2", "title", "goodbye world")
+        client.execute_command("HSET", "doc:3", "title", "hello universe")
+        client.execute_command("HSET", "doc:4", "title", "This is universe")
+        IndexingTestHelper.wait_for_backfill_complete_on_node(client, "idx")
+        
+        # Test negation: -hello should return doc:2 (doesn't have "hello")
+        result = client.execute_command("FT.SEARCH", "idx", "-hello")
+        assert (result[0], set(result[1::2])) == (2, {b"doc:2", b"doc:4"})
+        
+        # Test negation with AND: world -hello should return doc:2
+        result = client.execute_command("FT.SEARCH", "idx", "world -hello")
+        assert (result[0], set(result[1::2])) == (1, {b"doc:2"})
+
+    def test_text_negation(self):
+        """Test comprehensive text negation with proximity, fuzzy, exact phrase, suffix, and prefix"""
+        client = self.server.get_new_client()
+        
+        client.execute_command("FT.CREATE", "idx", "ON", "HASH", "SCHEMA",
+                            "title", "TEXT", "NOSTEM", "WITHSUFFIXTRIE",
+                            "body", "TEXT", "NOSTEM", "WITHSUFFIXTRIE")
+        
+        # Minimal dataset: 5 documents
+        client.execute_command("HSET", "doc:1", "title", "hello world", "body", "quick brown fox")
+        client.execute_command("HSET", "doc:2", "title", "hello universe", "body", "lazy dog running")
+        client.execute_command("HSET", "doc:3", "title", "goodbye world", "body", "quick brown cat")
+        client.execute_command("HSET", "doc:4", "body", "fox jumping high")  # No title
+        client.execute_command("HSET", "doc:5", "price", "100")  # No text fields
+        IndexingTestHelper.wait_for_backfill_complete_on_node(client, "idx")
+        # (1) Basic negation
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:hello')
+        assert (result[0], set(result[1::2])) == (3, {b"doc:3", b"doc:4", b"doc:5"})
+        # (2) Prefix negation
+        result = client.execute_command("FT.SEARCH", "idx", '-@body:qui*')
+        assert (result[0], set(result[1::2])) == (3, {b"doc:2", b"doc:4", b"doc:5"})
+        # (3) Suffix negation
+        result = client.execute_command("FT.SEARCH", "idx", '-@body:*ing')
+        assert (result[0], set(result[1::2])) == (3, {b"doc:1", b"doc:3", b"doc:5"})
+        # (4) Fuzzy negation
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:%helo%')
+        assert (result[0], set(result[1::2])) == (3, {b"doc:3", b"doc:4", b"doc:5"})
+        # (5) Exact phrase negation
+        # import pdb; pdb.set_trace()
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:"hello world"')
+        assert (result[0], set(result[1::2])) == (4, {b"doc:2", b"doc:3", b"doc:4", b"doc:5"})
+        # (6) Proximity with negation
+        result = client.execute_command("FT.SEARCH", "idx", '@body:quick @body:brown -@title:goodbye', "SLOP", "1")
+        assert (result[0], set(result[1::2])) == (1, {b"doc:1"})
+        # (7) INORDER with negation
+        result = client.execute_command("FT.SEARCH", "idx", '@body:quick @body:brown -@body:cat', "INORDER")
+        assert (result[0], set(result[1::2])) == (1, {b"doc:1"})
+        # (8) Schema-wide negation
+        result = client.execute_command("FT.SEARCH", "idx", '-hello')
+        assert (result[0], set(result[1::2])) == (3, {b"doc:3", b"doc:4", b"doc:5"})
+        # (9) Multiple negations
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:hello -@body:fox')
+        assert (result[0], set(result[1::2])) == (2, {b"doc:3", b"doc:5"})
+        # (10) Negation with keys having no text fields
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:world')
+        assert (result[0], set(result[1::2])) == (3, {b"doc:2", b"doc:4", b"doc:5"})
+
+
 
 class TestFullTextDebugMode(ValkeySearchTestCaseDebugMode):
     """

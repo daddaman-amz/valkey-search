@@ -24,6 +24,7 @@
 #include "src/indexes/text/lexer.h"
 #include "src/indexes/text/posting.h"
 #include "src/indexes/text/radix_tree.h"
+#include "src/utils/string_interning.h"
 
 struct sb_stemmer;
 
@@ -146,6 +147,10 @@ class TextIndexSchema {
   // True if any text attributes of the schema have suffix search enabled.
   bool with_suffix_trie_ = false;
 
+  // Schema-level key tracking for negation support
+  InternedStringSet schema_tracked_keys_ ABSL_GUARDED_BY(schema_keys_mutex_);
+  InternedStringSet schema_untracked_keys_ ABSL_GUARDED_BY(schema_keys_mutex_);
+  mutable std::mutex schema_keys_mutex_;
  public:
   // FT.INFO memory stats for text index
   uint64_t GetTotalPositions() const;
@@ -185,6 +190,25 @@ class TextIndexSchema {
     // Key not found in text indexes - this is normal for keys without text data
     return nullptr;
   }
+
+  // Thread-safe accessors for schema-level key tracking
+  // Returns copies to avoid holding mutex during iteration
+  InternedStringSet GetSchemaTrackedKeys() const {
+    std::lock_guard<std::mutex> guard(schema_keys_mutex_);
+    return schema_tracked_keys_;
+  }
+  
+  InternedStringSet GetSchemaUntrackedKeys() const {
+    std::lock_guard<std::mutex> guard(schema_keys_mutex_);
+    return schema_untracked_keys_;
+  }
+
+  // // Track a key for negation queries. Keys are initially added as untracked
+  // // and moved to tracked if they have text data during CommitKeyData.
+  // void AddKeyForNegation(const InternedStringPtr& key) {
+  //   std::lock_guard<std::mutex> guard(schema_keys_mutex_);
+  //   schema_untracked_keys_.insert(key);
+  // }
 };
 
 }  // namespace valkey_search::indexes::text
