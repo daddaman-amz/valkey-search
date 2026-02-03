@@ -183,9 +183,10 @@ VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  estimated_size is " <<
       positive_iter->NextKey();
     }
 VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  matched_keys count is " << matched_keys.size();
-    // Get tracked and untracked keys from schema (copies, not references)
+    // Get copies of tracked and untracked keys from schema
     InternedStringSet tracked_keys = GetTextIndexSchema()->GetSchemaTrackedKeys();
     InternedStringSet untracked_keys = GetTextIndexSchema()->GetSchemaUntrackedKeys();
+
 
     // Calculate negation size: (tracked - matched) + untracked
     size_t negation_size = (tracked_keys.size() > matched_keys.size() 
@@ -195,6 +196,7 @@ VMSDK_LOG(NOTICE, nullptr) << " In TextPredicate::Search  negation_size is " << 
     // Create negation iterator - iterator now owns the sets
     auto neg_iter = std::make_unique<indexes::text::NegationTextIterator>(
         std::move(tracked_keys), std::move(matched_keys), std::move(untracked_keys), GetFieldMask());
+
     
     return new NegationFetcher(std::move(neg_iter), negation_size);
   }

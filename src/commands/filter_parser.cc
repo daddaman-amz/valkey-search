@@ -445,7 +445,7 @@ absl::StatusOr<FilterParseResults> FilterParser::Parse() {
   results.query_operations = query_operations_;
   // Only generate query syntax tree output if debug logging is enabled.
   // if (valkey_search::options::GetLogLevel().GetValue() ==
-  //     static_cast<int>(LogLevel::kWarning))
+  //     static_cast<int>(LogLevel::kWarning)) {
     if(true) {
     std::string tree_output =
         PrintPredicateTree(results.root_predicate.get(), 0);

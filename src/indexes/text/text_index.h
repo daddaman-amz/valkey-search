@@ -192,7 +192,7 @@ class TextIndexSchema {
   }
 
   // Thread-safe accessors for schema-level key tracking
-  // Returns copies to avoid holding mutex during iteration
+  // Returns copies to ensure thread safety
   InternedStringSet GetSchemaTrackedKeys() const {
     std::lock_guard<std::mutex> guard(schema_keys_mutex_);
     return schema_tracked_keys_;

@@ -16,9 +16,10 @@ namespace valkey_search::indexes::text {
 class NegationTextIterator : public TextIterator {
  public:
   NegationTextIterator(InternedStringSet tracked_keys,
-                       InternedStringSet matched_keys,
-                       InternedStringSet untracked_keys,
-                       FieldMaskPredicate field_mask);
+                      InternedStringSet matched_keys,
+                      InternedStringSet untracked_keys,
+                      FieldMaskPredicate field_mask);
+
 
   FieldMaskPredicate QueryFieldMask() const override;
   bool DoneKeys() const override;

@@ -155,11 +155,12 @@ inline bool IsTextProximityOnlyNonNested(QueryOperations query_operations) {
   bool has_required = (query_operations & QueryOperations::kContainsText) &&
                       (query_operations & QueryOperations::kContainsAnd) &&
                       (query_operations & QueryOperations::kContainsProximity);
-  // 2. Must NOT contain any of: Nested, Numeric, or Tag
+  // 2. Must NOT contain any of: Nested, Numeric, Tag, or Negate
   bool has_forbidden =
       query_operations &
       (QueryOperations::kContainsNestedComposed |
-       QueryOperations::kContainsNumeric | QueryOperations::kContainsTag);
+       QueryOperations::kContainsNumeric | QueryOperations::kContainsTag |
+       QueryOperations::kContainsNegate);
   return has_required && !has_forbidden;
 }
 
@@ -179,12 +180,14 @@ size_t EvaluateFilterAsPrimary(
     const Predicate *predicate,
     std::queue<std::unique_ptr<indexes::EntriesFetcherBase>> &entries_fetchers,
     bool negate, QueryOperations query_operations) {
-  // Faster path for pure exact phrase queries.
-  // This is an optimization to avoid building multiple term iterators and a
-  // proximity iterator for every key's evaluation in the filtering stage (using
-  // the PrefilterEvaluator).
-  if (IsTextProximityOnlyNonNested(query_operations) && !negate) {
-    CHECK(predicate->GetType() == PredicateType::kComposedAnd);
+  VMSDK_LOG(NOTICE, nullptr) << "EvaluateFilterAsPrimary: predicate_type=" 
+      << static_cast<int>(predicate->GetType()) << " negate=" << negate 
+      << " IsTextProximityOnlyNonNested=" << IsTextProximityOnlyNonNested(query_operations);
+  
+  // Faster path for pure exact phrase queries (non-negated only).
+  if (IsTextProximityOnlyNonNested(query_operations) && !negate && 
+      predicate->GetType() == PredicateType::kComposedAnd) {
+    VMSDK_LOG(NOTICE, nullptr) << "Taking exact phrase optimization path";
     auto composed_predicate =
         dynamic_cast<const ComposedPredicate *>(predicate);
     auto fetcher = BuildExactPhraseFetcher(composed_predicate);
@@ -192,57 +195,65 @@ size_t EvaluateFilterAsPrimary(
     entries_fetchers.push(std::move(fetcher));
     return size;
   }
-   else if (IsTextProximityOnlyNonNested(query_operations) && negate) {
-    CHECK(predicate->GetType() == PredicateType::kComposedAnd);
-    auto composed_predicate = dynamic_cast<const ComposedPredicate *>(predicate);
-    // Build exact phrase fetcher to collect matched keys
-    auto phrase_fetcher = BuildExactPhraseFetcher(composed_predicate);
-    auto phrase_iter = phrase_fetcher->Begin();
-    
-    InternedStringSet matched_keys;
-    while (!phrase_iter->Done()) {
-      matched_keys.insert(**phrase_iter);
-      phrase_iter->Next();
-    }
-    
-    // Get text index schema from first child
-    CHECK(!composed_predicate->GetChildren().empty());
-    auto first_child = composed_predicate->GetChildren()[0].get();
-    CHECK(first_child->GetType() == PredicateType::kText);
-    auto text_pred = dynamic_cast<const TextPredicate*>(first_child);
-    auto text_index_schema = text_pred->GetTextIndexSchema();
-    
-    // Get tracked and untracked keys
-    InternedStringSet tracked_keys = text_index_schema->GetSchemaTrackedKeys();
-    InternedStringSet untracked_keys = text_index_schema->GetSchemaUntrackedKeys();
-    
-    // Calculate negation size
-    size_t negation_size = (tracked_keys.size() > matched_keys.size() 
-                            ? tracked_keys.size() - matched_keys.size() 
-                            : 0) + untracked_keys.size();
-    
-    // Get field mask
-    // uint64_t field_mask = text_pred->GetFieldMask();
-    FieldMaskPredicate field_mask = ~0ULL;
-    for (const auto& child : composed_predicate->GetChildren()) {
-      CHECK(child->GetType() == PredicateType::kText);
-      auto child_text_pred = dynamic_cast<const TextPredicate*>(child.get());
-      field_mask &= child_text_pred->GetFieldMask();
-    }
-    
-    // Create negation iterator
-    auto neg_iter = std::make_unique<indexes::text::NegationTextIterator>(
-        std::move(tracked_keys), std::move(matched_keys), 
-        std::move(untracked_keys), field_mask);
-    entries_fetchers.push(std::unique_ptr<indexes::EntriesFetcherBase>(
-        new NegationFetcher(std::move(neg_iter), negation_size)));
-    return negation_size;
-  }
 
   if (predicate->GetType() == PredicateType::kComposedAnd ||
       predicate->GetType() == PredicateType::kComposedOr) {
+    VMSDK_LOG(NOTICE, nullptr) << "Handling ComposedAnd/Or";
     auto composed_predicate =
         dynamic_cast<const ComposedPredicate *>(predicate);
+    
+    // Special handling for negated proximity queries
+    // Cannot use De Morgan's law as it loses proximity constraints
+    if (negate && (composed_predicate->GetSlop() > 0 || composed_predicate->GetInorder())) {
+      auto slop_val = composed_predicate->GetSlop().has_value() ? composed_predicate->GetSlop().value() : 0;
+      VMSDK_LOG(NOTICE, nullptr) << "Negated proximity query - using evaluation approach - slop=" 
+          << slop_val << " inorder=" << composed_predicate->GetInorder();
+      
+      // Get text index schema from first child
+      CHECK(!composed_predicate->GetChildren().empty());
+      auto first_child = composed_predicate->GetChildren()[0].get();
+      CHECK(first_child->GetType() == PredicateType::kText);
+      auto text_pred = dynamic_cast<const TextPredicate*>(first_child);
+      auto text_index_schema = text_pred->GetTextIndexSchema();
+      
+      // Get copies of tracked and untracked keys
+      InternedStringSet tracked_keys = text_index_schema->GetSchemaTrackedKeys();
+      InternedStringSet untracked_keys = text_index_schema->GetSchemaUntrackedKeys();
+      
+      // Collect matched keys by evaluating positive query on each tracked key
+      InternedStringSet matched_keys;
+      for (const auto& key : tracked_keys) {
+        const valkey_search::indexes::text::TextIndex *text_index =
+            valkey_search::indexes::text::TextIndexSchema::LookupTextIndex(
+                text_index_schema->GetPerKeyTextIndexes(), key);
+        indexes::PrefilterEvaluator evaluator(text_index);
+        if (evaluator.Evaluate(*composed_predicate, key)) {
+          matched_keys.insert(key);
+        }
+      }
+      
+      // Calculate negation size
+      size_t negation_size = (tracked_keys.size() > matched_keys.size() 
+                              ? tracked_keys.size() - matched_keys.size() 
+                              : 0) + untracked_keys.size();
+      
+      // Get field mask
+      FieldMaskPredicate field_mask = ~0ULL;
+      for (const auto& child : composed_predicate->GetChildren()) {
+        CHECK(child->GetType() == PredicateType::kText);
+        auto child_text_pred = dynamic_cast<const TextPredicate*>(child.get());
+        field_mask &= child_text_pred->GetFieldMask();
+      }
+      
+      // Create negation iterator
+      auto neg_iter = std::make_unique<indexes::text::NegationTextIterator>(
+          std::move(tracked_keys), std::move(matched_keys), 
+          std::move(untracked_keys), field_mask);
+      entries_fetchers.push(std::unique_ptr<indexes::EntriesFetcherBase>(
+          new NegationFetcher(std::move(neg_iter), negation_size)));
+      return negation_size;
+    }
+    
     auto predicate_type =
         EvaluateAsComposedPredicate(composed_predicate, negate);
     if (predicate_type == PredicateType::kComposedAnd) {
@@ -296,6 +307,7 @@ size_t EvaluateFilterAsPrimary(
     return size;
   }
   if (predicate->GetType() == PredicateType::kNegate) {
+    VMSDK_LOG(NOTICE, nullptr) << "Handling NegatePredicate";
     auto negate_predicate = dynamic_cast<const NegatePredicate *>(predicate);
     size_t result =
         EvaluateFilterAsPrimary(negate_predicate->GetPredicate(),

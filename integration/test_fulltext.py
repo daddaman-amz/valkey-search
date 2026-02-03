@@ -89,6 +89,7 @@ def validate_fulltext_search(client: Valkey):
     IndexingTestHelper.wait_for_backfill_complete_on_node(client, "products")
     # Perform the text search query with term and prefix operations that return a match.
     # text_query_exact_phrase1 is crashing.
+    import pdb; pdb.set_trace()
     match = [text_query_term, text_query_prefix, text_query_prefix2, text_query_exact_phrase1, text_query_exact_phrase2]
     for query in match:
         result = client.execute_command(*query)
@@ -1734,6 +1735,96 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         result = client.execute_command("FT.SEARCH", "idx", '-@title:world')
         assert (result[0], set(result[1::2])) == (3, {b"doc:2", b"doc:4", b"doc:5"})
 
+    def test_text_negation_realistic(self):
+        """Comprehensive realistic tests for text negation functionality"""
+        client = self.server.get_new_client()
+        
+        client.execute_command("FT.CREATE", "idx", "ON", "HASH", "SCHEMA",
+                            "title", "TEXT", "NOSTEM", "WITHSUFFIXTRIE",
+                            "content", "TEXT", "NOSTEM", "WITHSUFFIXTRIE",
+                            "tags", "TAG",
+                            "price", "NUMERIC")
+        
+        # Realistic product dataset
+        client.execute_command("HSET", "doc:1", "title", "red shoes", "content", "comfortable running shoes for athletes", "tags", "footwear", "price", "50")
+        client.execute_command("HSET", "doc:2", "title", "blue shoes", "content", "stylish walking shoes for everyday", "tags", "footwear", "price", "40")
+        client.execute_command("HSET", "doc:3", "title", "red jacket", "content", "warm winter jacket for cold weather", "tags", "clothing", "price", "80")
+        client.execute_command("HSET", "doc:4", "title", "blue jacket", "content", "lightweight jacket for spring", "tags", "clothing", "price", "60")
+        client.execute_command("HSET", "doc:5", "title", "running gear", "content", "complete set for marathon training", "tags", "sports", "price", "120")
+        client.execute_command("HSET", "doc:6", "content", "clearance sale items available")  # No title
+        client.execute_command("HSET", "doc:7", "tags", "accessories", "price", "10")  # No text fields
+        
+        IndexingTestHelper.wait_for_backfill_complete_on_node(client, "idx")
+        
+        # Test 1: Simple negation - products NOT containing "shoes"
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:shoes')
+        assert result[0] == 5
+        assert set(result[1::2]) == {b"doc:3", b"doc:4", b"doc:5", b"doc:6", b"doc:7"}
+        
+        # Test 2: Negation with tag filter - footwear that's NOT blue
+        result = client.execute_command("FT.SEARCH", "idx", '@tags:{footwear} -@title:blue')
+        assert result[0] == 1 and result[1] == b"doc:1"
+        
+        # Test 3: Negation with price range - items $50-$100 NOT jackets
+        result = client.execute_command("FT.SEARCH", "idx", '@price:[50 100] -@title:jacket')
+        assert result[0] == 1
+        assert result[1] == b"doc:1"
+        import pdb; pdb.set_trace()
+        # Test 4: Prefix negation - items NOT starting with "run"
+        result = client.execute_command("FT.SEARCH", "idx", '-@content:run*')
+        assert result[0] == 6
+        assert set(result[1::2]) == {b"doc:2", b"doc:3", b"doc:4", b"doc:5", b"doc:6", b"doc:7"}
+        
+        # Test 5: Suffix negation - items NOT ending with "ing"
+        result = client.execute_command("FT.SEARCH", "idx", '-@content:*ing')
+        assert result[0] == 3
+        assert set(result[1::2]) == {b"doc:3", b"doc:6", b"doc:7"}
+        
+        # Test 6: Fuzzy negation - exclude fuzzy matches of "walking"
+        result = client.execute_command("FT.SEARCH", "idx", '-@content:%waking%')
+        assert result[0] == 6
+        assert b"doc:2" not in result[1::2]
+        
+        # Test 7: Exact phrase negation - NOT "running shoes"
+        result = client.execute_command("FT.SEARCH", "idx", '@content:shoes -@content:"running shoes"')
+        assert result[0] == 1 and result[1] == b"doc:2"
+        
+        # Test 8: Proximity with negation - "comfortable" and "shoes" within 2 words, NOT "running"
+        result = client.execute_command("FT.SEARCH", "idx", '@content:comfortable @content:shoes -@content:running', "SLOP", "2")
+        assert result[0] == 0  # No matches - "comfortable" always comes with "running shoes"
+        
+        # Test 9: INORDER with negation - "lightweight" before "jacket", NOT "winter"
+        result = client.execute_command("FT.SEARCH", "idx", '@content:lightweight @content:jacket -@content:winter', "INORDER")
+        assert result[0] == 1 and result[1] == b"doc:4"
+        
+        # Test 10: Multiple negations - shoes that are NOT red and NOT running
+        result = client.execute_command("FT.SEARCH", "idx", '@title:shoes -@title:red -@content:running')
+        assert result[0] == 1 and result[1] == b"doc:2"
+        
+        # Test 11: Double negation - NOT(NOT red) = red items
+        result = client.execute_command("FT.SEARCH", "idx", '-(-@title:red)')
+        assert result[0] == 2
+        assert set(result[1::2]) == {b"doc:1", b"doc:3"}
+        
+        # Test 12: Schema-wide negation - any field NOT containing "jacket"
+        result = client.execute_command("FT.SEARCH", "idx", '-jacket')
+        assert result[0] == 5
+        assert set(result[1::2]) == {b"doc:1", b"doc:2", b"doc:5", b"doc:6", b"doc:7"}
+        
+        # Test 13: Complex: price range + tag + negation with wildcards
+        result = client.execute_command("FT.SEARCH", "idx", '@price:[40 80] @tags:{footwear|clothing} -@content:*ing')
+        assert result[0] == 1
+        assert set(result[1::2]) == {b"doc:3"}
+        
+        # Test 14: Edge case - negation includes docs with no text fields
+        result = client.execute_command("FT.SEARCH", "idx", '-@title:shoes')
+        assert b"doc:7" in result[1::2]  # doc:7 has no title, should be included
+        
+        # Test 15: Edge case - negation includes docs missing the queried field
+        result = client.execute_command("FT.SEARCH", "idx", '-@content:sale')
+        assert result[0] == 6
+        assert b"doc:7" in result[1::2]  # doc:7 has no content field
+
 
 
 class TestFullTextDebugMode(ValkeySearchTestCaseDebugMode):
@@ -1891,6 +1982,7 @@ class TestFullTextCluster(ValkeySearchClusterTestCaseDebugMode):
         """
         cluster_client: ValkeyCluster = self.new_cluster_client()
         client: Valkey = self.new_client_for_primary(0)
+        import pdb; pdb.set_trace()
         # Create the text index on Hash documents
         assert client.execute_command(text_index_on_hash) == b"OK"
         # Data population:

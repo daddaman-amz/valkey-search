@@ -162,6 +162,9 @@ void TextIndexSchema::CommitKeyData(const InternedStringPtr &key) {
   if (!has_any_text_content) {
     return;
   }
+  // if (token_positions.empty()) {  // temp check
+  //   return;
+  // }
   TextIndex key_index{with_suffix_trie_};
 
   // Index the key's tokens
