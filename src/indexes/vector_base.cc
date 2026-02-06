@@ -105,10 +105,15 @@ query::EvaluationResult PrefilterEvaluator::EvaluateNumeric(
 query::EvaluationResult PrefilterEvaluator::EvaluateText(
     const query::TextPredicate &predicate, bool require_positions) {
   CHECK(key_);
+  VMSDK_LOG(NOTICE, nullptr) << "[PREFILTER-TEXT] key=" << (*key_)->Str() 
+      << " text_index_=" << (text_index_ ? "EXISTS" : "NULL");
   if (!text_index_) {
     return query::EvaluationResult(false);
   }
-  return predicate.Evaluate(*text_index_, *key_, require_positions);
+  auto result = predicate.Evaluate(*text_index_, *key_, require_positions);
+  VMSDK_LOG(NOTICE, nullptr) << "[PREFILTER-TEXT] key=" << (*key_)->Str() 
+      << " result=" << result.matches;
+  return result;
 }
 
 template <typename T>

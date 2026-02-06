@@ -88,7 +88,6 @@ def validate_fulltext_search(client: Valkey):
     IndexingTestHelper.wait_for_backfill_complete_on_node(client, "products")
     # Perform the text search query with term and prefix operations that return a match.
     # text_query_exact_phrase1 is crashing.
-    import pdb; pdb.set_trace()
     match = [text_query_term, text_query_prefix, text_query_prefix2, text_query_exact_phrase1, text_query_exact_phrase2]
     for query in match:
         result = client.execute_command(*query)
@@ -1274,7 +1273,6 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         # # Double negation
         # result = client.execute_command("FT.SEARCH", "idx", '-(-@content:"alpha beta")', "NOCONTENT")
         # assert result[0] == 1 and b"doc:1" in result
-        import pdb; pdb.set_trace()
         result = client.execute_command("FT.SEARCH", "idx", '-@content:"alpha beta"')
         assert result[0] == 10 and b"doc:1" not in result
 
@@ -2017,7 +2015,6 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         result = client.execute_command("FT.SEARCH", "idx", '-@title:%helo%')
         assert (result[0], set(result[1::2])) == (3, {b"doc:3", b"doc:4", b"doc:5"})
         # (5) Exact phrase negation
-        # import pdb; pdb.set_trace()
         result = client.execute_command("FT.SEARCH", "idx", '-@title:"hello world"')
         assert (result[0], set(result[1::2])) == (4, {b"doc:2", b"doc:3", b"doc:4", b"doc:5"})
         # (6) Proximity with negation
@@ -2070,7 +2067,6 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         result = client.execute_command("FT.SEARCH", "idx", '@price:[50 100] -@title:jacket')
         assert result[0] == 1
         assert result[1] == b"doc:1"
-        import pdb; pdb.set_trace()
         # Test 4: Prefix negation - items NOT starting with "run"
         result = client.execute_command("FT.SEARCH", "idx", '-@content:run*')
         assert result[0] == 6
@@ -2085,7 +2081,6 @@ class TestFullText(ValkeySearchTestCaseDebugMode):
         result = client.execute_command("FT.SEARCH", "idx", '-@content:%waking%')
         assert result[0] == 6
         assert b"doc:2" not in result[1::2]
-        
         # Test 7: Exact phrase negation - NOT "running shoes"
         result = client.execute_command("FT.SEARCH", "idx", '@content:shoes -@content:"running shoes"')
         assert result[0] == 1 and result[1] == b"doc:2"
@@ -2283,7 +2278,6 @@ class TestFullTextCluster(ValkeySearchClusterTestCaseDebugMode):
         """
         cluster_client: ValkeyCluster = self.new_cluster_client()
         client: Valkey = self.new_client_for_primary(0)
-        import pdb; pdb.set_trace()
         # Create the text index on Hash documents
         assert client.execute_command(text_index_on_hash) == b"OK"
         # Data population:

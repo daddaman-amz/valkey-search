@@ -438,6 +438,11 @@ EvaluationResult ComposedPredicate::Evaluate(Evaluator& evaluator) const {
           child->GetType() == PredicateType::kText) {
         continue;
       }
+//        if (evaluator.IsPrefilterEvaluator() && !require_positions &&
+//           child->GetType() == PredicateType::kText) {
+// VMSDK_LOG(NOTICE, nullptr) << " Predicate.cc >> Inside ComposedPredicate::Evaluate. The !require_positions is  " << !require_positions;
+//         continue;
+//       }
       EvaluationResult result =
           EvaluatePredicate(child.get(), evaluator, require_positions);
       // Short-circuit on first false
